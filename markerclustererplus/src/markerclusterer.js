@@ -160,19 +160,28 @@ ClusterIcon.prototype.onAdd = function () {
 
             // The default click handler follows. Disable it by setting
             // the zoomOnClick property to false.
-            if (mc.getZoomOnClick()) {
-                // Zoom into the cluster.
-                mz = mc.getMaxZoom();
-                theBounds = cClusterIcon.cluster_.getBounds();
-                mc.getMap().fitBounds(theBounds);
-                // There is a fix for Issue 170 here:
-                setTimeout(function () {
-                    mc.getMap().fitBounds(theBounds);
-                    // Don't zoom beyond the max zoom level
-                    if (mz !== null && (mc.getMap().getZoom() > mz)) {
-                        mc.getMap().setZoom(mz + 1);
-                    }
-                }, 100);
+            var clusterClickHandler = mc.getOnClusterClick();
+
+            if (typeof clusterClickHandler !== 'undefined') {
+                var handlerResult = clusterClickHandler(cClusterIcon.cluster_);
+                if (handlerResult === true) {
+                    handleZoomOnClick();
+                }
+                else if (handlerResult === false) {
+                    // do nuthin
+                }
+                else {
+                    console.log(handlerResult);
+                }
+            }
+            else {
+                handleZoomOnClick();
+            }
+
+            function handleZoomOnClick() {
+                if (mc.getZoomOnClick()) {
+                    cClusterIcon.cluster_.zoom();
+                }
             }
 
             // Prevent event propagation to the map:
@@ -301,40 +310,20 @@ ClusterIcon.prototype.useStyle = function (sums) {
     index = Math.min(this.styles_.length - 1, index);
     var style = this.styles_[index] || {};
 
-    var imageMode = this.cluster_.getMarkerClusterer().getImageMode();
+    var getClusterIcon = this.cluster_.markerClusterer_.getClusterIcon;
 
-    if (imageMode === MarkerClusterer.ImageModes.QUANTITY) {
-        this.url_ = style.url;
-        this.height_ = style.height;
-        this.width_ = style.width;
-        this.anchorIcon_ = style.anchorIcon || [parseInt(this.height_ / 2, 10), parseInt(this.width_ / 2, 10)];
-    }
-    else {
-        // In this case, style.url hasn't been pre-populated during MarkerClusterer.setupStyles_ (should we?) - we need
-        // to check the markers belonging to this cluster in order to get the correct icon to show.
-
-        // Get all icons used by the markers
-        var markersIconNames = [];
-        this.cluster_.getMarkers().forEach(function(marker) {
-            var iconName = marker.icon.split('/').pop().split('.')[0];
-            if (markersIconNames.indexOf(iconName) === -1) {
-                markersIconNames.push(iconName);
-            }
-        });
-
-        var markerClusterer = this.cluster_.getMarkerClusterer();
-        var filename =
-            markerClusterer.getImagePath() +
-            markersIconNames.sort().join('-') +
-            '.' +
-            markerClusterer.getImageExtension();
-
-        this.url_ = filename;
-        this.height_ = 44;
-        this.width_ = 44;
-        this.anchorIcon_ = [parseInt(this.height_ / 2, 10), parseInt(this.width_ / 2, 10)];
+    if (getClusterIcon === undefined) {
+        throw new Error('Missing getClusterIcon');
     }
 
+    var result = getClusterIcon(this.cluster_.getMarkers());
+
+    this.url_ = result.url;
+    this.height_ = result.height;
+    this.width_ = result.width;
+
+    // Get all icons used by the markers
+    this.anchorIcon_ = [parseInt(this.height_ / 2, 10), parseInt(this.width_ / 2, 10)];
 
     this.anchorText_ = style.anchorText || [0, 0];
     this.textColor_ = style.textColor || "black";
@@ -412,6 +401,22 @@ function Cluster(mc) {
     this.clusterIcon_ = new ClusterIcon(this, mc.getStyles());
 }
 
+Cluster.prototype.zoom = function() {
+    var mc = this.getMarkerClusterer();
+
+    // Zoom into the cluster.
+    var mz = mc.getMaxZoom();
+    var theBounds = this.getBounds();
+    mc.getMap().fitBounds(theBounds);
+    // There is a fix for Issue 170 here:
+    setTimeout(function () {
+        mc.getMap().fitBounds(theBounds);
+        // Don't zoom beyond the max zoom level
+        if (mz !== null && (mc.getMap().getZoom() > mz)) {
+            mc.getMap().setZoom(mz + 1);
+        }
+    }, 100);
+};
 
 /**
  * Returns the number of markers managed by the cluster. You can call this from
@@ -669,6 +674,8 @@ Cluster.prototype.isMarkerAlreadyAdded_ = function (marker) {
  * @property {string} [clusterClass="cluster"] The name of the CSS class defining general styles
  *  for the cluster markers. Use this class to define CSS styles that are not set up by the code
  *  that processes the <code>styles</code> array.
+ *  @property {function} [markers] Gives back the icon to use for the cluster of markers based on the contained
+ *  markers.
  * @property {Array} [styles] An array of {@link ClusterIconStyle} elements defining the styles
  *  of the cluster markers to be used. The element to be used to style a given cluster marker
  *  is determined by the function defined by the <code>calculator</code> property.
@@ -746,14 +753,19 @@ function MarkerClusterer(map, opt_markers, opt_options) {
     if (opt_options.enableRetinaIcons !== undefined) {
         this.enableRetinaIcons_ = opt_options.enableRetinaIcons;
     }
+
+    if (opt_options.getClusterIcon !== undefined) {
+        this.getClusterIcon = opt_options.getClusterIcon;
+    }
+
     this.imagePath_ = opt_options.imagePath || MarkerClusterer.IMAGE_PATH;
-    this.imageMode_ = opt_options.imageMode || MarkerClusterer.ImageModes.QUANTITY;
     this.imageExtension_ = opt_options.imageExtension || MarkerClusterer.IMAGE_EXTENSION;
     this.imageSizes_ = opt_options.imageSizes || MarkerClusterer.IMAGE_SIZES;
     this.calculator_ = opt_options.calculator || MarkerClusterer.CALCULATOR;
     this.batchSize_ = opt_options.batchSize || MarkerClusterer.BATCH_SIZE;
     this.batchSizeIE_ = opt_options.batchSizeIE || MarkerClusterer.BATCH_SIZE_IE;
     this.clusterClass_ = opt_options.clusterClass || "cluster";
+    this.onClusterClick = opt_options.onClusterClick || function() {};
 
     if (navigator.userAgent.toLowerCase().indexOf("msie") !== -1) {
         // Try to avoid IE timeout when processing a huge number of markers:
@@ -854,43 +866,14 @@ MarkerClusterer.prototype.setupStyles_ = function () {
         return;
     }
 
-    switch (this.imageMode_) {
-        case MarkerClusterer.ImageModes.QUANTITY:
-            for (i = 0; i < this.imageSizes_.length; i++) {
-                size = this.imageSizes_[i];
-                this.styles_.push({
-                    url: this.imagePath_ + (i + 1) + "." + this.imageExtension_,
-                    height: size,
-                    width: size
-                });
-            }
-            break;
-
-        case MarkerClusterer.ImageModes.ICONS:
-            // Find marker icons
-            /*var markerIcons = [];
-            this.markers_.forEach(function(marker) {
-                var iconName = marker.icon.split('/').pop().split('.')[0];
-                if (markerIcons.indexOf(iconName) === -1) {
-                    markerIcons.push(iconName);
-                }
-            });
-
-            for (i = 0; i < this.imageSizes_.length; i++) {
-                size = this.imageSizes_[i];
-                this.styles_.push({
-                    url: this.imagePath_ + (i + 1) + "." + this.imageExtension_,
-                    height: size,
-                    width: size
-                });
-            }*/
-            break;
-
-        default:
-            throw new Error('Unknown ImageMode: ' + this.imageMode_);
+    for (i = 0; i < this.imageSizes_.length; i++) {
+        size = this.imageSizes_[i];
+        this.styles_.push({
+            url: this.imagePath_ + (i + 1) + "." + this.imageExtension_,
+            height: size,
+            width: size
+        });
     }
-
-
 };
 
 
@@ -1130,14 +1113,6 @@ MarkerClusterer.prototype.setImagePath = function (imagePath) {
     this.imagePath_ = imagePath;
 };
 
-MarkerClusterer.prototype.getImageMode = function() {
-    return this.imageMode_;
-};
-
-MarkerClusterer.prototype.setImageMode = function(imageMode) {
-    this.imageMode_ = imageMode;
-};
-
 
 /**
  * Returns the value of the <code>imageSizes</code> property.
@@ -1219,6 +1194,16 @@ MarkerClusterer.prototype.setClusterClass = function (clusterClass) {
     this.clusterClass_ = clusterClass;
 };
 
+MarkerClusterer.prototype.getOnClusterClick = function() {
+    return this.onClusterClick;
+};
+
+MarkerClusterer.prototype.setOnClusterClick = function(onClusterClick) {
+    if (typeof onClusterClick !== 'function') {
+        throw new Error("Expected function");
+    }
+    this.onClusterClick = onClusterClick;
+};
 
 /**
  *  Returns the array of markers managed by the clusterer.
@@ -1716,11 +1701,6 @@ MarkerClusterer.IMAGE_PATH = "https://cdn.rawgit.com/googlemaps/js-marker-cluste
  * @constant
  */
 MarkerClusterer.IMAGE_EXTENSION = "png";
-
-MarkerClusterer.ImageModes = {
-    QUANTITY: 'quantity',
-    ICONS: 'icons',
-};
 
 
 /**
